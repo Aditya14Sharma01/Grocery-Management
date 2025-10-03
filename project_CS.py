@@ -1,20 +1,31 @@
 import mysql.connector as sql
 from datetime import date
 import time as t
+import os
+from decimal import Decimal
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+import bcrypt
 def create_tables(cursor):
     try:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Stock (
-                p_id INT PRIMARY KEY, 
+                p_id INT PRIMARY KEY,
+                sku VARCHAR(64) UNIQUE,
                 name VARCHAR(100) NOT NULL,
-                price INT NOT NULL, 
-                quantity INT,
+                price DECIMAL(10,2) NOT NULL,
+                cost_price DECIMAL(10,2),
+                quantity INT CHECK (quantity >= 0),
+                tax_rate DECIMAL(5,2) DEFAULT 18.00,
                 brand VARCHAR(100),
                 supplier VARCHAR(100))""")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Profits (
                 p_id INT PRIMARY KEY,
-                profit INT,
+                profit DECIMAL(10,2),
                 FOREIGN KEY (p_id) REFERENCES Stock(p_id))""")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Cust_info (
@@ -27,15 +38,38 @@ def create_tables(cursor):
                 bill_no INT AUTO_INCREMENT PRIMARY KEY,
                 cust_id INT,
                 bill_date DATE,
-                total_price INT,
-                gst INT,
+                total_price DECIMAL(10,2),
+                gst DECIMAL(10,2),
                 FOREIGN KEY (cust_id) REFERENCES Cust_info(cust_id))""")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS BillItems (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                bill_no INT NOT NULL,
+                p_id INT NOT NULL,
+                quantity INT NOT NULL,
+                unit_price DECIMAL(10,2) NOT NULL,
+                tax_rate DECIMAL(5,2) NOT NULL,
+                line_total DECIMAL(10,2) NOT NULL,
+                FOREIGN KEY (bill_no) REFERENCES Bills(bill_no),
+                FOREIGN KEY (p_id) REFERENCES Stock(p_id))""")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Users (
+                user_id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(50) NOT NULL UNIQUE,
+                password_hash VARBINARY(60) NOT NULL,
+                role ENUM('owner','manager','cashier') NOT NULL DEFAULT 'cashier',
+                active TINYINT(1) NOT NULL DEFAULT 1
+            )""")
         print("Tables 'Stock', 'Profits', 'Cust_info', and 'Bills' created or already exist.")
     except sql.Error as e:
         print(f"Error creating tables: {e}")
 def connect_to_database():
     try:
-        mydb = sql.connect(host='localhost', user='root', password='1401', database='project_cs', charset='utf8')
+        db_host = os.getenv('DB_HOST', 'localhost')
+        db_user = os.getenv('DB_USER', 'root')
+        db_password = os.getenv('DB_PASSWORD', '')
+        db_name = os.getenv('DB_NAME', 'project_cs')
+        mydb = sql.connect(host=db_host, user=db_user, password=db_password, database=db_name, charset='utf8')
         print("Establishing Connection ... ")
         t.sleep(0.5)
         print(f"Your Connection ID is {mydb.connection_id}")
@@ -97,6 +131,59 @@ def add_item(cursor, db_connection):
         print(f"Error adding product: {e}")
     except ValueError as ve:
         print(f"Invalid input: {ve}")
+def ensure_owner_user(cursor, db_connection):
+    try:
+        cursor.execute("SELECT COUNT(*) FROM Users")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            print("No users found. Create an owner account.")
+            while True:
+                username = input("Set owner username: ").strip()
+                if username:
+                    break
+            while True:
+                password = input("Set owner password: ").strip()
+                if len(password) >= 6:
+                    break
+                print("Password must be at least 6 characters.")
+            pw_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            cursor.execute("INSERT INTO Users (username, password_hash, role) VALUES (%s, %s, 'owner')", (username, pw_hash))
+            db_connection.commit()
+            print("Owner account created.")
+    except sql.Error as e:
+        print(f"Error ensuring owner user: {e}")
+
+def login(cursor):
+    print("Login Required")
+    for _ in range(3):
+        username = input("Username: ").strip()
+        password = input("Password: ").strip()
+        try:
+            cursor.execute("SELECT user_id, password_hash, role, active FROM Users WHERE username = %s", (username,))
+            row = cursor.fetchone()
+            if row is None:
+                print("Invalid credentials.")
+                continue
+            user_id, password_hash, role, active = row
+            if not active:
+                print("Account is inactive.")
+                continue
+            if bcrypt.checkpw(password.encode('utf-8'), password_hash):
+                print(f"Logged in as {username} ({role})")
+                return {"user_id": user_id, "username": username, "role": role}
+            else:
+                print("Invalid credentials.")
+        except sql.Error as e:
+            print(f"Login error: {e}")
+            break
+    return None
+
+def require_owner(current_user):
+    if not current_user or current_user.get('role') != 'owner':
+        print("Access denied. Owner permissions required.")
+        return False
+    return True
+
 def check_total_gst(cursor):
     print("Checking Total GST Collected")
     try:
@@ -239,42 +326,41 @@ def check_reorder(cursor, db_connection):
                         print("Invalid input. Please enter 'yes' or 'no'.")
     except sql.Error as e:
         print(f"Error checking reorder levels: {e}")
-def admin_privileges(cursor, db_connection):
-    password = input("Enter admin password: ")
-    if password == "1234":
-        while True:
-            print("Admin Privileges")
-            print("4. Check Stock")
-            print("5. Check Customer Info")
-            print("6. Update Customer Info")
-            print("7. Insert New Product")
-            print("8. Check Reorder Level")
-            print("9. Check Total GST")
-            print("10. Check Total Profits")
-            print("e. Exit Admin Privileges")
-            choice = str(input("Enter your choice: "))
-            if choice == '3':
-                create_tables(cursor)
-            elif choice == '4':
-                check_stock(cursor)
-            elif choice == '5':
-                cust_info(cursor)
-            elif choice == '6':
-                cust_update(cursor, db_connection)
-            elif choice == '7':
-                add_item(cursor, db_connection)
-            elif choice == '8':
-                check_reorder(cursor, db_connection)
-            elif choice == '9':
-                check_total_gst(cursor)
-            elif choice == '10':
-                check_total_profits(cursor)
-            elif choice.lower() in ('e','exit'):
-                break
-            else:
-                print("Invalid choice. Please select a valid option.")
-    else:
-        print("Incorrect password")
+def admin_privileges(cursor, db_connection, current_user):
+    if not require_owner(current_user):
+        return
+    while True:
+        print("Admin Privileges (Owner)")
+        print("4. Check Stock")
+        print("5. Check Customer Info")
+        print("6. Update Customer Info")
+        print("7. Insert New Product")
+        print("8. Check Reorder Level")
+        print("9. Check Total GST")
+        print("10. Check Total Profits")
+        print("11. Manage Users (Add/Disable)")
+        print("e. Exit Admin Privileges")
+        choice = str(input("Enter your choice: "))
+        if choice == '4':
+            check_stock(cursor)
+        elif choice == '5':
+            cust_info(cursor)
+        elif choice == '6':
+            cust_update(cursor, db_connection)
+        elif choice == '7':
+            add_item(cursor, db_connection)
+        elif choice == '8':
+            check_reorder(cursor, db_connection)
+        elif choice == '9':
+            check_total_gst(cursor)
+        elif choice == '10':
+            check_total_profits(cursor)
+        elif choice == '11':
+            manage_users(cursor, db_connection)
+        elif choice.lower() in ('e','exit'):
+            break
+        else:
+            print("Invalid choice. Please select a valid option.")
 def genrate():
     import base64
     info = [base64.b64decode(data).decode('utf-8') for data in ['QWRpdHlhIFNoYXJtYQ==', 'UHVsa2l0IEFnZ2Fyd2Fs']]
@@ -283,9 +369,11 @@ def check_total_profits(cursor):
     print("Checking Total Profits")
     try:
         cursor.execute("""
-            SELECT SUM(p.price * p.quantity) AS total_sales, SUM(pr.profit * p.quantity) AS total_profits
-            FROM Stock p
-            LEFT JOIN Profits pr ON p.p_id = pr.p_id
+            SELECT
+                SUM(bi.quantity * bi.unit_price) AS total_sales,
+                SUM((bi.unit_price - IFNULL(s.cost_price,0)) * bi.quantity) AS total_profit
+            FROM BillItems bi
+            INNER JOIN Stock s ON s.p_id = bi.p_id
         """)
         result = cursor.fetchone()
         if result:
@@ -298,9 +386,44 @@ def check_total_profits(cursor):
             print("No profit data available.")
     except sql.Error as e:
         print(f"Error fetching total profits: {e}")
+
+def manage_users(cursor, db_connection):
+    while True:
+        print("User Management")
+        print("1. Add user")
+        print("2. Disable user")
+        print("e. Back")
+        choice = input("Choose: ").strip()
+        if choice == '1':
+            username = input("Username: ").strip()
+            role = input("Role (owner/manager/cashier): ").strip()
+            if role not in ('owner','manager','cashier'):
+                print("Invalid role.")
+                continue
+            password = input("Password: ").strip()
+            pw_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            try:
+                cursor.execute("INSERT INTO Users (username, password_hash, role) VALUES (%s, %s, %s)", (username, pw_hash, role))
+                db_connection.commit()
+                print("User added.")
+            except sql.Error as e:
+                print(f"Error adding user: {e}")
+        elif choice == '2':
+            username = input("Username to disable: ").strip()
+            try:
+                cursor.execute("UPDATE Users SET active = 0 WHERE username = %s", (username,))
+                db_connection.commit()
+                print("User disabled.")
+            except sql.Error as e:
+                print(f"Error disabling user: {e}")
+        elif choice.lower() in ('e','exit'):
+            break
+        else:
+            print("Invalid choice.")
 def bill(cursor, db_connection):
     print("Making Bills")
     try:
+        db_connection.start_transaction()
         while True:
             phone = input("Enter Phone no. of Customer: ")
             if len(phone) != 10 or not phone.isdigit():
@@ -320,23 +443,11 @@ def bill(cursor, db_connection):
             db_connection.commit()
             cust_id = cursor.lastrowid
             print("Customer Information Added")
-        final_p = 0
-        total_profit = 0
+        final_p = Decimal('0.00')
+        total_profit = Decimal('0.00')
+        items_added = []
         while True:
-            try:
-                cursor.execute("""
-                    SELECT Stock.p_id, Stock.name, Stock.price, Stock.quantity, Stock.brand, Stock.supplier
-                    FROM Stock
-                """)
-                result = cursor.fetchall()
-                print(f"{'P_ID':<10} {'Name':<20} {'Price':<10} {'Quantity':<10} {'Brand':<20} {'Supplier':<20}")
-                print("=" * 90)
-                for rec in result:
-                    p_id, name, price, quantity, brand, supplier= rec
-                    print(f"{p_id:<10} {name:<20} {price:<10} {quantity:<10} {brand:<20} {supplier:<20}")
-            except sql.Error as e:
-                print(f"Error fetching stock details: {e}")
-            prod_id = input("Enter product ID (press 'e' or 'exit' to finalize bill): ")
+            prod_id = input("Enter product ID or search text (e=finalize): ")
             if prod_id.lower() in ('e', 'exit'):
                 break
             elif prod_id.isdigit():
@@ -345,40 +456,74 @@ def bill(cursor, db_connection):
                     print("Quantity must be greater than zero.")
                     continue
                 select_query = """
-                    SELECT price, quantity FROM Stock WHERE p_id = %s
+                    SELECT price, quantity, tax_rate FROM Stock WHERE p_id = %s FOR UPDATE
                 """
                 cursor.execute(select_query, (prod_id,))
                 result = cursor.fetchone()
                 if result:
-                    price, stock_quantity = result
+                    price, stock_quantity, tax_rate = result
                     if quantity <= stock_quantity:
-                        total_price = price * quantity
+                        unit_price = Decimal(str(price))
+                        total_price = unit_price * Decimal(quantity)
                         cursor.execute("SELECT profit FROM Profits WHERE p_id = %s", (prod_id,))
-                        profit = cursor.fetchone()[0]
-                        item_profit = profit * quantity
+                        profit = cursor.fetchone()[0] if cursor.rowcount else Decimal('0.00')
+                        item_profit = Decimal(str(profit)) * Decimal(quantity)
                         final_p += total_price
                         total_profit += item_profit
                         new_quantity = stock_quantity - quantity
                         update_stock_query = "UPDATE Stock SET quantity = %s WHERE p_id = %s"
                         cursor.execute(update_stock_query, (new_quantity, prod_id))
-                        db_connection.commit()
+                        line_tax_rate = Decimal(str(tax_rate if tax_rate is not None else 18))
+                        line_total = total_price  # tax will be computed at bill level sum of lines
+                        items_added.append((prod_id, quantity, unit_price, line_tax_rate, line_total))
                         print(f"Added {quantity} items to bill. Total: {total_price}")
                     else:
                         print("Insufficient stock.")
                 else:
                     print("Product not found.")
             else:
-                print("Invalid product ID.")
-        gst = int(final_p * 0.18)
-        grand_total = final_p + gst
+                try:
+                    q = f"%{prod_id}%"
+                    cursor.execute("""
+                        SELECT p_id, name, price, quantity FROM Stock
+                        WHERE name LIKE %s OR sku LIKE %s
+                        ORDER BY quantity DESC LIMIT 10
+                    """, (q, q))
+                    rows = cursor.fetchall()
+                    if not rows:
+                        print("No matching items.")
+                    else:
+                        print(f"{'P_ID':<10}{'Name':<20}{'Price':<10}{'Qty':<8}")
+                        for pid, name, price, qty in rows:
+                            print(f"{pid:<10}{name:<20}{price:<10}{qty:<8}")
+                except sql.Error as e:
+                    print(f"Search error: {e}")
+                
+        total_gst = Decimal('0.00')
+        for _, qty, unit_price, tax_rate, _ in items_added:
+            line_subtotal = unit_price * Decimal(qty)
+            total_gst += (line_subtotal * (tax_rate / Decimal('100')))
+        gst = total_gst.quantize(Decimal('0.01'))
+        grand_total = (final_p + gst).quantize(Decimal('0.01'))
         bill_date = date.today()
         insert_bill_query = """
             INSERT INTO Bills (cust_id, bill_date, total_price, gst)
             VALUES (%s, %s, %s, %s)"""
         cursor.execute(insert_bill_query, (cust_id, bill_date, final_p, gst))
-        db_connection.commit()
         bill_id = cursor.lastrowid
+        for p_id, qty, unit_price, tax_rate, line_total in items_added:
+            cursor.execute(
+                """
+                INSERT INTO BillItems (bill_no, p_id, quantity, unit_price, tax_rate, line_total)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (bill_id, p_id, qty, unit_price, tax_rate, line_total)
+            )
+        db_connection.commit()
+        invoice_no = f"INV-{bill_date.year}-{bill_id:06d}"
+        print_receipt(cursor, bill_id, invoice_no)
         print(f'\nBill ID: {bill_id}')
+        print(f'Invoice No: {invoice_no}')
         print(f'Customer ID: {cust_id}')
         print(f'Total Before GST: {final_p}')
         print(f'Applied GST: {gst}')
@@ -386,22 +531,68 @@ def bill(cursor, db_connection):
         print(f'Bill Date: {bill_date}')
     except sql.Error as e:
         print(f"Error processing bill: {e}")
+        try:
+            db_connection.rollback()
+        except Exception:
+            pass
     except ValueError as ve:
         print(f"Invalid input: {ve}")
+
+def print_receipt(cursor, bill_id, invoice_no):
+    try:
+        cursor.execute("""
+            SELECT b.bill_no, b.bill_date, b.total_price, b.gst, c.name, c.phone_no, c.address
+            FROM Bills b
+            INNER JOIN Cust_info c ON c.cust_id = b.cust_id
+            WHERE b.bill_no = %s
+        """, (bill_id,))
+        bill = cursor.fetchone()
+        cursor.execute("""
+            SELECT bi.p_id, s.name, bi.quantity, bi.unit_price, bi.tax_rate, bi.line_total
+            FROM BillItems bi INNER JOIN Stock s ON s.p_id = bi.p_id
+            WHERE bi.bill_no = %s
+        """, (bill_id,))
+        items = cursor.fetchall()
+        os.makedirs('receipts', exist_ok=True)
+        file_path = os.path.join('receipts', f'{invoice_no}.txt')
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("GROCERY SHOP RECEIPT\n")
+            f.write(f"Invoice: {invoice_no}\n")
+            f.write(f"Date: {bill[1]}\n")
+            f.write(f"Customer: {bill[4]}  Phone: {bill[5]}\n")
+            f.write("\nItems:\n")
+            f.write(f"{'P_ID':<8}{'Name':<20}{'Qty':<6}{'Price':<10}{'Tax%':<6}{'Line':<10}\n")
+            for p_id, name, qty, price, tax_rate, line_total in items:
+                f.write(f"{p_id:<8}{name:<20}{qty:<6}{price:<10}{tax_rate:<6}{line_total:<10}\n")
+            f.write("\n")
+            f.write(f"Subtotal: {bill[2]}\n")
+            f.write(f"GST: {bill[3]}\n")
+            f.write(f"Grand Total: {(bill[2] + bill[3])}\n")
+        print(f"Receipt saved to {file_path}")
+    except Exception as e:
+        print(f"Error printing receipt: {e}")
 def main():
     db_connection, cursor = connect_to_database()
     if not db_connection or not cursor:
         return
+    create_tables(cursor)
+    ensure_owner_user(cursor, db_connection)
+    current_user = login(cursor)
+    if not current_user:
+        print("Exiting due to failed login.")
+        db_connection.close()
+        return
     while True:
         print("Main Menu")
         print("1. Generate Bill")
-        print("2. Admin Privileges")
+        if current_user.get('role') == 'owner':
+            print("2. Admin Privileges")
         print("e. Exit")
         choice = input("Enter your choice: ").strip().lower()
         if choice == '1':
             bill(cursor, db_connection)
-        elif choice == '2':
-            admin_privileges(cursor, db_connection)
+        elif choice == '2' and current_user.get('role') == 'owner':
+            admin_privileges(cursor, db_connection, current_user)
         elif choice in ('e', 'exit'):
             genrate()
             print("Exiting...")
